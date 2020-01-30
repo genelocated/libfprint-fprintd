@@ -1,4 +1,4 @@
-AC_INIT([fprintd], [0.8.0])
+AC_INIT([fprintd], [0.9.0])
 AM_INIT_AUTOMAKE([1.11 dist-xz no-dist-gzip check-news])
 AC_CONFIG_SRCDIR([src/main.c])
 AC_CONFIG_HEADERS([config.h])
@@ -60,6 +60,8 @@ AC_ARG_WITH([systemdsystemunitdir],
             [],
             [with_systemdsystemunitdir=$($PKG_CONFIG --variable=systemdsystemunitdir systemd)])
 AS_IF([test "x$with_systemdsystemunitdir" != "xno"], [
+  # StateDirectory was introduced in systemd 235
+  PKG_CHECK_MODULES(SYSTEMD, systemd >= 235)
   AC_SUBST([systemdsystemunitdir], [$with_systemdsystemunitdir])
 ])
 AM_CONDITIONAL(HAVE_SYSTEMD, [test -n "$systemdsystemunitdir"])
@@ -70,7 +72,8 @@ DBUS_SERVICES_DIR="$DATADIR/dbus-1/services"
 AC_SUBST(DBUS_SERVICES_DIR)
 AC_DEFINE_UNQUOTED(DBUS_SERVICES_DIR, "$DBUS_SERVICES_DIR", [Where services dir for DBUS is])
 
-AC_DEFINE_UNQUOTED(SYSCONFDIR, "$sysconfdir", [Where the configuration file will be located])
+AS_AC_EXPAND(SYSCONFDIR, $sysconfdir)
+AC_DEFINE_UNQUOTED(SYSCONFDIR, "$SYSCONFDIR", [Where the configuration file will be located])
 
 GNOME_COMPILE_WARNINGS
 

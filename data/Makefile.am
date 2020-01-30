@@ -6,7 +6,7 @@ dbus_services_DATA = $(dbus_services_in_files:.service.in=.service)
 $(dbus_services_DATA): $(dbus_services_in_files)
 	sed -e "s|\@LIBEXECDIR\@|$(libexecdir)|" $< > $@
 
-dbus_confdir = $(sysconfdir)/dbus-1/system.d
+dbus_confdir = $(datadir)/dbus-1/system.d
 dbus_conf_DATA = net.reactivated.Fprint.conf
 
 systemdservice_in_files = fprintd.service.in
@@ -15,7 +15,7 @@ if HAVE_SYSTEMD
 systemdservicedir       = $(systemdsystemunitdir)
 systemdservice_DATA     = $(systemdservice_in_files:.service.in=.service)
 $(systemdservice_DATA): $(systemdservice_in_files) Makefile
-	@sed -e "s|\@libexecdir\@|$(libexecdir)|" -e "s|\@localstatedir\@|$(localstatedir)|" $< > $@
+	@sed -e "s|\@libexecdir\@|$(libexecdir)|" $< > $@
 endif
 
 polkitdir = $(datadir)/polkit-1/actions

@@ -469,7 +469,6 @@ _fprint_device_check_for_username (FprintDevice *rdev,
 	char *sender;
 	unsigned long uid;
 	struct passwd *user;
-	char *client_username;
 
 	/* Get details about the current sender, and username/uid */
 	conn = dbus_g_connection_get_connection (fprintd_dbus_conn);
@@ -490,17 +489,16 @@ _fprint_device_check_for_username (FprintDevice *rdev,
 			    "Failed to get information about user UID %lu", uid);
 		return NULL;
 	}
-	client_username = g_strdup (user->pw_name);
 
 	/* The current user is usually allowed to access their
 	 * own data, this should be followed by PolicyKit checks
 	 * anyway */
-	if (username == NULL || *username == '\0' || g_str_equal (username, client_username)) {
+	if (username == NULL || *username == '\0' || g_str_equal (username, user->pw_name)) {
 		if (ret_sender != NULL)
 			*ret_sender = sender;
 		else
 			g_free (sender);
-		return client_username;
+		return g_strdup (user->pw_name);
 	}
 
 	/* If we're not allowed to set a different username,
@@ -558,7 +556,12 @@ _fprint_device_client_vanished (GDBusConnection *connection,
 
 		/* Close the claimed device as well */
 		if (priv->dev) {
-			fp_async_dev_close (priv->dev, action_stop_cb, &done);
+			struct fp_dev *dev;
+
+			dev = priv->dev;
+			priv->dev = NULL;
+
+			fp_async_dev_close (dev, action_stop_cb, &done);
 			while (done == FALSE)
 				g_main_context_iteration (NULL, TRUE);
 		}
@@ -601,7 +604,7 @@ static void dev_open_cb(struct fp_dev *dev, int status, void *user_data)
 	FprintDevicePrivate *priv = DEVICE_GET_PRIVATE(rdev);
 	struct session_data *session = priv->session;
 
-	g_message("device %d claim status %d", priv->id, status);
+	g_debug("device %d claim status %d", priv->id, status);
 
 	if (status != 0) {
 		GError *error = NULL;
@@ -670,7 +673,7 @@ static void fprint_device_claim(FprintDevice *rdev,
 	priv->username = user;
 	priv->sender = sender;
 
-	g_message ("user '%s' claiming the device: %d", priv->username, priv->id);
+	g_debug ("user '%s' claiming the device: %d", priv->username, priv->id);
 
 	priv->session = g_slice_new0(struct session_data);
 	priv->session->context_claim_device = context;
@@ -709,7 +712,7 @@ static void dev_close_cb(struct fp_dev *dev, void *user_data)
 	g_free (priv->username);
 	priv->username = NULL;
 
-	g_message("released device %d", priv->id);
+	g_debug("released device %d", priv->id);
 	dbus_g_method_return(context);
 }
 
@@ -737,12 +740,39 @@ static void fprint_device_release(FprintDevice *rdev,
 	}
 
 	session->context_release_device = context;
-	if (priv->dev)
-		fp_async_dev_close(priv->dev, dev_close_cb, rdev);
+	if (priv->dev) {
+		struct fp_dev *dev;
+
+		dev = priv->dev;
+		priv->dev = NULL;
+		fp_async_dev_close(dev, dev_close_cb, rdev);
+	}
 }
 
-static void verify_cb(struct fp_dev *dev, int r, struct fp_img *img,
-		      void *user_data)
+static void verify_cb(struct fp_dev *dev,
+		      int            r,
+		      struct fp_img *img,
+		      void          *user_data);
+
+static void
+verify_restart_cb(struct fp_dev *dev,
+		  void          *user_data)
+{
+	struct FprintDevice *rdev = user_data;
+	FprintDevicePrivate *priv = DEVICE_GET_PRIVATE(rdev);
+
+	if (priv->current_action != ACTION_VERIFY)
+		return;
+
+	g_debug("verify_restart_cb: restarting verification");
+	fp_async_verify_start(priv->dev, priv->verify_data, verify_cb, rdev);
+}
+
+static void
+verify_cb(struct fp_dev *dev,
+	  int            r,
+	  struct fp_img *img,
+	  void          *user_data)
 {
 	struct FprintDevice *rdev = user_data;
 	FprintDevicePrivate *priv = DEVICE_GET_PRIVATE(rdev);
@@ -751,10 +781,22 @@ static void verify_cb(struct fp_dev *dev, int r, struct fp_img *img,
 	if (priv->action_done != FALSE)
 		return;
 
-	g_message("verify_cb: result %s (%d)", name, r);
+	g_debug("verify_cb: result %s (%d)", name, r);
 
-	if (r == FP_VERIFY_NO_MATCH || r == FP_VERIFY_MATCH || r < 0)
-		priv->action_done = TRUE;
+	if (r == FP_VERIFY_RETRY ||
+	    r == FP_VERIFY_RETRY_TOO_SHORT ||
+	    r == FP_VERIFY_RETRY_CENTER_FINGER ||
+	    r == FP_VERIFY_RETRY_REMOVE_FINGER) {
+		g_debug ("verify_cb: stopping current verification to retry");
+		fp_img_free(img);
+		if (fp_async_verify_stop(priv->dev, verify_restart_cb, user_data) == 0) {
+			g_signal_emit(rdev, signals[SIGNAL_VERIFY_STATUS], 0, name, priv->action_done);
+			return;
+		}
+		/* fallthrough to error out if restarting failed */
+	}
+
+	priv->action_done = TRUE;
 	set_disconnected (priv, name);
 	g_signal_emit(rdev, signals[SIGNAL_VERIFY_STATUS], 0, name, priv->action_done);
 	fp_img_free(img);
@@ -765,8 +807,32 @@ static void verify_cb(struct fp_dev *dev, int r, struct fp_img *img,
 	}
 }
 
-static void identify_cb(struct fp_dev *dev, int r,
-			 size_t match_offset, struct fp_img *img, void *user_data)
+static void identify_cb(struct fp_dev *dev,
+			int            r,
+			size_t         match_offset,
+			struct fp_img *img,
+			void          *user_data);
+
+static void
+identify_restart_cb(struct fp_dev *dev,
+		    void          *user_data)
+{
+	struct FprintDevice *rdev = user_data;
+	FprintDevicePrivate *priv = DEVICE_GET_PRIVATE(rdev);
+
+	if (priv->current_action != ACTION_IDENTIFY)
+		return;
+
+	g_debug("identify_restart_cb: restarting identification");
+	fp_async_identify_start (priv->dev, priv->identify_data, identify_cb, rdev);
+}
+
+static void
+identify_cb(struct fp_dev *dev,
+	    int            r,
+	    size_t         match_offset,
+	    struct fp_img *img,
+	    void          *user_data)
 {
 	struct FprintDevice *rdev = user_data;
 	FprintDevicePrivate *priv = DEVICE_GET_PRIVATE(rdev);
@@ -775,10 +841,22 @@ static void identify_cb(struct fp_dev *dev, int r,
 	if (priv->action_done != FALSE)
 		return;
 
-	g_message("identify_cb: result %s (%d)", name, r);
+	g_debug("identify_cb: result %s (%d)", name, r);
 
-	if (r == FP_VERIFY_NO_MATCH || r == FP_VERIFY_MATCH || r < 0)
-		priv->action_done = TRUE;
+	if (r == FP_VERIFY_RETRY ||
+	    r == FP_VERIFY_RETRY_TOO_SHORT ||
+	    r == FP_VERIFY_RETRY_CENTER_FINGER ||
+	    r == FP_VERIFY_RETRY_REMOVE_FINGER) {
+		g_debug ("identify_cb: stopping current identification to retry");
+		fp_img_free(img);
+		if (fp_async_identify_stop(priv->dev, identify_restart_cb, user_data) == 0) {
+			g_signal_emit(rdev, signals[SIGNAL_VERIFY_STATUS], 0, name, priv->action_done);
+			return;
+		}
+		/* fallthrough to error out if restarting failed */
+	}
+
+	priv->action_done = TRUE;
 	set_disconnected (priv, name);
 	g_signal_emit(rdev, signals[SIGNAL_VERIFY_STATUS], 0, name, priv->action_done);
 	fp_img_free(img);
@@ -846,7 +924,7 @@ static void fprint_device_verify_start(FprintDevice *rdev,
 			array = g_ptr_array_new ();
 
 			for (l = prints; l != NULL; l = l->next) {
-				g_message ("adding finger %d to the gallery", GPOINTER_TO_INT (l->data));
+				g_debug ("adding finger %d to the gallery", GPOINTER_TO_INT (l->data));
 				r = store.print_data_load(priv->dev, GPOINTER_TO_INT (l->data),
 							  &data, priv->username);
 				if (r == 0)
@@ -876,12 +954,12 @@ static void fprint_device_verify_start(FprintDevice *rdev,
 		}
 		priv->current_action = ACTION_IDENTIFY;
 
-		g_message ("start identification device %d", priv->id);
+		g_debug ("start identification device %d", priv->id);
 		r = fp_async_identify_start (priv->dev, gallery, identify_cb, rdev);
 	} else {
 		priv->current_action = ACTION_VERIFY;
 
-		g_message("start verification device %d finger %d", priv->id, finger_num);
+		g_debug("start verification device %d finger %d", priv->id, finger_num);
 
 		r = store.print_data_load(priv->dev, (enum fp_finger)finger_num, 
 					  &data, priv->username);
@@ -982,6 +1060,13 @@ static void fprint_device_verify_stop(FprintDevice *rdev,
 		return;
 	}
 
+	if (r == -EINPROGRESS) {
+		g_debug ("%s stop already in progress",
+			 priv->current_action == ACTION_VERIFY ? "verification" : "identification");
+		dbus_g_method_return(context);
+		r = 0;
+	}
+
 	if (r < 0) {
 		g_set_error(&error, FPRINT_ERROR, FPRINT_ERROR_INTERNAL,
 			"Verify stop failed with error %d", r);
@@ -1007,7 +1092,7 @@ static void enroll_stage_cb(struct fp_dev *dev, int result,
 	if (priv->action_done != FALSE)
 		return;
 
-	g_message("enroll_stage_cb: result %d", result);
+	g_debug("enroll_stage_cb: result %d", result);
 	if (result == FP_ENROLL_COMPLETE) {
 		r = store.print_data_save(print, session->enroll_finger, priv->username);
 		if (r < 0)
@@ -1066,7 +1151,7 @@ static void fprint_device_enroll_start(FprintDevice *rdev,
 		return;
 	}
 
-	g_message("start enrollment device %d finger %d", priv->id, finger_num);
+	g_debug("start enrollment device %d finger %d", priv->id, finger_num);
 	session->enroll_finger = finger_num;
 	priv->action_done = FALSE;
 	

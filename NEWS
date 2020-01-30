@@ -1,6 +1,23 @@
 This file lists notable changes in each release. For the full history of all
 changes, see ChangeLog.
 
+version 0.9.0:
+- Fix hangs when there the verification error was "retry"
+- Update for fp_get_pollfds() changes
+- Fix "client_username" memory leak, fix memory leak when saving a file
+- Create the fingerprint storage directory at install time,
+  the storage path is now hard-coded as /var/lib/fprint and created by
+  systemd when the service is started
+
+version 0.8.1:
+- Fix build when builddir != srcdir
+- Fix possible crash on exit
+- Avoid warnings in copy/paste header
+- Sandbox fprintd daemon more
+- Update website address
+- Minimise debug output
+- Updated translations
+
 version 0.8.0:
 - Lockdown the daemon to minimise potential security issues
 - Don't wake up readers when there's no enrolled fingerprints

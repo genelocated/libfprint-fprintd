@@ -382,7 +382,7 @@ static int do_verify(GMainLoop *loop, pam_handle_t *pamh, DBusGProxy *dev, gbool
 				g_free (data->result);
 				break;
 			} else {
-				send_info_msg (data->pamh, "An unknown error occured");
+				send_info_msg (data->pamh, "An unknown error occurred");
 				ret = PAM_AUTH_ERR;
 				g_free (data->result);
 				break;
@@ -510,8 +510,13 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc,
 					   G_TYPE_NONE, G_TYPE_STRING, G_TYPE_BOOLEAN, G_TYPE_INVALID);
 
 	pam_get_item(pamh, PAM_RHOST, (const void **)(const void*) &rhost);
-	if (rhost != NULL && strlen(rhost) > 0) {
-		/* remote login (e.g. over SSH) */
+
+	/* NULL or empty rhost if the host information is not available or set.
+	 * "localhost" if the host is local.
+	 * We want to not run for known remote hosts */
+	if (rhost != NULL &&
+	    *rhost != '\0' &&
+	    strcmp (rhost, "localhost") != 0) {
 		return PAM_AUTHINFO_UNAVAIL;
 	}
 
